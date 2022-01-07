@@ -2,13 +2,14 @@ module particles
     use parameters
     implicit none
 
+    
     type :: Particle
-        real(kind=prec), dimension(3,3)  :: coords                  ! coordinates of the particle
-        real(kind=prec), dimension(3,3)  :: velocity                ! velocity of the particle
-        real(kind=prec), dimension(1:3)  :: acceler                 ! acceleration of the particle
-        real(kind=prec), dimension(1:3)  :: density            ! density of the particle
-        real(kind=prec), dimension(1:3)  :: pressure           ! pressure at the particle
-        real(kind=prec), dimension(1:3)  :: c_sound            ! sound speed
+        real(kind=prec), dimension(2,3)  :: coords                  ! coordinates of the particle
+        real(kind=prec), dimension(2,3)  :: velocity                ! velocity of the particle
+        real(kind=prec), dimension(1:2)  :: acceler                 ! acceleration of the particle
+        real(kind=prec), dimension(1:3)  :: density                 ! density of the particle
+        real(kind=prec), dimension(1:3)  :: pressure                ! pressure at the particle
+        real(kind=prec), dimension(1:3)  :: c_sound                 ! sound speed
         real(kind=prec), dimension(1:3)  :: u_therm                 ! Thermal Energy
         real(kind=prec)                  :: mass = 1.               ! mass of the particle
         real(kind=prec)                  :: h_part = 0.5            ! smoothing length

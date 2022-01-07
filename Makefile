@@ -9,12 +9,12 @@ FLFLAGS = -g -fbacktrace
 
 # edition de liens
 main: main.o parameters.o particles.o kernels.o sort_parts.o equations.o get_neighbours.o application.o
-	$(FC) -o main.x *.o
+	$(FC) -o main-Verlet.x *.o -fopenmp
 # compilation
 main.o: main.f90 application.o
 	$(FC) $(FCFLAGS) main.f90
 application.o: application.f90 get_neighbours.o sort_parts.o equations.o kernels.o particles.o parameters.o
-	$(FC) $(FCFLAGS) application.f90
+	$(FC) $(FCFLAGS) application.f90 -fopenmp
 get_neighbours.o: get_neighbours.f90 sort_parts.o equations.o particles.o parameters.o
 	$(FC) $(FCFLAGS) get_neighbours.f90
 equations.o: equations.f90 particles.o parameters.o

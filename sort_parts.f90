@@ -4,12 +4,12 @@ module sort_parts
     implicit none
 
     type :: ParticleSort
-        real(kind=prec) :: h_max
-        real(kind=prec) :: CellSize
-        integer         :: nCells_Row = 1
-        integer         :: nCells     = 1
-        class(ListPA), dimension(:), allocatable :: LCells
-        logical :: init
+        real(kind=prec)                             :: h_max
+        real(kind=prec)                             :: CellSize
+        integer                                     :: nCells_Row = 1
+        integer                                     :: nCells     = 1
+        class(ListPA), dimension(:), allocatable    :: LCells
+        logical                                     :: init
     contains
         procedure :: get_h_max
         procedure :: setCells
@@ -18,10 +18,10 @@ module sort_parts
 
 contains
     subroutine get_h_max(self, lst_parts)
-        class(ParticleSort) :: self
-        type(ListPA)  :: lst_parts
+        class(ParticleSort)                         :: self
+        type(ListPA)                                :: lst_parts
 
-        integer             :: i
+        integer                                     :: i
 
         self%h_max = 0.0d0
 
@@ -33,10 +33,10 @@ contains
     end subroutine get_h_max
 
     subroutine setCells(self,dom_dim, kappa,LP)
-        class(particleSort)                                        :: self
-        real(kind=prec), intent(in)                                :: dom_dim
-        integer, intent(in)                                        :: kappa
-        class(ListPA), intent(in)                               :: LP
+        class(particleSort)                         :: self
+        real(kind=prec), intent(in)                 :: dom_dim
+        integer, intent(in)                         :: kappa
+        class(ListPA), intent(in)                   :: LP
 
         call self%get_h_max(LP)
 
@@ -48,7 +48,7 @@ contains
         !self%nCells_Row = self%nCells_Row +1
 
 
-        self%nCells = self%nCells_Row**3+1
+        self%nCells = self%nCells_Row**2 + 1
         self%CellSize = dom_dim / self%nCells_Row
 
         allocate(self%LCells(1:self%nCells))
@@ -61,9 +61,9 @@ contains
 
 
         integer :: i, j
-        integer, dimension(1:3) :: iCell
+        integer, dimension(1:2) :: iCell
         integer :: part_position
-        real(kind=prec), dimension(1:3) :: xyz
+        real(kind=prec), dimension(1:2) :: xz
         integer :: numPart
 
         numPart = LP%nb_elts
@@ -73,15 +73,15 @@ contains
         !     end if
         ! end do
         do i = 1, numPart
-            xyz = LP%lst_PA(i)%PTR%Part%coords(:,1)
-            do j = 1,3
-                if (xyz(j) == dom_dim) then
+            xz = LP%lst_PA(i)%PTR%Part%coords(:,1)
+            do j = 1,2
+                if (xz(j) == dom_dim) then
                     iCell(j) = self%nCells_Row
                 else
-                    iCell(j) = nint( ( xyz(j) - mod(xyz(j), self%CellSize) )/self%CellSize ) + 1
+                    iCell(j) = nint( ( xz(j) - mod(xz(j), self%CellSize) )/self%CellSize ) + 1
                 end if
             end do
-            part_position = (( iCell(1) - 1) * self%nCells_Row + (iCell(2) - 1) ) * self%nCells_Row + iCell(3)
+            part_position = (iCell(1) - 1) * self%nCells_Row + iCell(2) 
             !print*,'nCells', self%nCells,'part pos:', part_position
             call self%LCells(part_position)%addEltPA(LP%lst_PA(i)%PTR)
         end do

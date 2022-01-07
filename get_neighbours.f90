@@ -11,20 +11,20 @@ contains
         implicit none
 
         ! I/O parameters
-        type(ParticleArray), target                :: PA
-        type(ParticleSort), intent(in)             :: sort
-        real(kind=prec), intent(in)                :: dom_dim               ! length of a side of the domain
-        integer, intent(in)                        :: kappa                 ! from the kernel
+        type(ParticleArray), target                        :: PA
+        type(ParticleSort), intent(in)                     :: sort
+        real(kind=prec), intent(in)                        :: dom_dim       ! length of a side of the domain
+        integer, intent(in)                                :: kappa         ! from the kernel
 
         integer :: integStep
 
         ! Internal parameters
-        integer, dimension(1:3)                            :: iCell         ! Identifies the cell of the particle
-        integer                                            :: i,j,k         ! loop counter
-        integer, dimension(1:27)                           :: cellsToCheck  ! number of the cells to check for neighbours
+        integer, dimension(1:2)                            :: iCell         ! Identifies the cell of the particle
+        integer                                            :: i,j         ! loop counter
+        integer, dimension(1:9)                           :: cellsToCheck  ! number of the cells to check for neighbours
         real(kind=prec), dimension(:), pointer, contiguous :: part_xyz      ! position of the particle
         real(kind=prec), dimension(:), pointer, contiguous :: neig_xyz      ! position of a neighbour
-        class(Particle), pointer                     :: cur_ptr             ! pointer toward a particle
+        class(Particle), pointer                           :: cur_ptr       ! pointer toward a particle
         type(ParticleList), pointer                        :: cur_nei       ! current list of neighbours
         real(kind=prec)                                    :: r             ! distance
 
@@ -32,7 +32,7 @@ contains
         part_xyz => PA%Part%coords(:,IntegStep)
 
         !> compute the location of the particle in the cells
-        do j = 1,3
+        do j = 1,2
             if (part_xyz(j) == dom_dim) then
                 iCell(j) = sort%nCells_Row
             else
@@ -43,17 +43,13 @@ contains
         !> compute the number of the neighbouring cells
         do i=-1,1
             do j=-1,1
-                do k=-1,1
-                    if ( (iCell(1) + i > 0) .and. (iCell(2) + j > 0) .and. (iCell(3) + k > 0) &
+                    if ( (iCell(1) + i > 0) .and. (iCell(2) + j > 0) &
                     & .and. &
-                    & (iCell(1) + i <= sort%nCells_Row) .and. (iCell(2) + j <= sort%nCells_Row) &
-                    & .and. (iCell(3) + k <= sort%nCells_Row)) then
-                        cellsToCheck((i+1) * 9 + (j+1) * 3 + (k + 2)) = &
-                        & ((iCell(1) + i - 1) * sort%nCells_Row + (iCell(2) + j - 1)) * sort%nCells_Row + (iCell(3) + k)
+                    & (iCell(1) + i <= sort%nCells_Row) .and. (iCell(2) + j <= sort%nCells_Row) ) then
+                        cellsToCheck((i+1) * 3 + (j+2)) = (iCell(1) + i - 1) * sort%nCells_Row + (iCell(2) + j)
                     else
-                        cellsToCheck((i+1) * 9 + (j+1) * 3 + (k + 2)) = 0
+                        cellsToCheck((i+1) * 3 + (j+2)) = 0
                     end if
-                end do
             end do
         end do
 
@@ -63,7 +59,7 @@ contains
         if (cur_nei%nb_elts /= 0) then
             call cur_nei%resetList()
         end if
-        do i = 1,27
+        do i = 1,9
             if (cellsToCheck(i) > 0) then
                 ! storage => sort%LCells(cellsToCheck(i))
                 do j = 1, sort%LCells(cellsToCheck(i))%nb_elts

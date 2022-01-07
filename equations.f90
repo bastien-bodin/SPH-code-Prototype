@@ -22,7 +22,7 @@ contains
         real(kind=prec), dimension(1:3) :: xyz2
         real(kind=prec)                 :: r_ab
 
-        r_ab = sqrt(sum( (xyz1(:) - xyz2(:)) * (xyz1(:) - xyz2(:)) ))
+        r_ab = sqrt((xyz1(1) - xyz2(1))**2 + (xyz1(2) - xyz2(2))**2 + (xyz1(3) - xyz2(3))**2 )
     end function eval_r
 
 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
@@ -55,7 +55,7 @@ contains
         real(kind=prec), intent(in) :: molMass
         integer :: IntegStep
 
-        Part%pressure(IntegStep) = (part%density(IntegStep) / rho_0 - 1) * idealGasCst * 293.15d0 / molMass
+        Part%pressure(IntegStep+1) = (part%density(IntegStep+1) / rho_0 - 1) * idealGasCst * 293.15d0 / molMass
     end subroutine P_IG
 
     subroutine P_WC(Part,c_0,rho_0,state_gamma, integStep)
@@ -82,8 +82,8 @@ contains
         real(kind=prec) :: pi_ab
 
         real(kind=prec) :: mu_ab = 0.0d0
-        real(kind=prec), dimension(1:3) :: v_ab
-        real(kind=prec), dimension(1:3) :: x_ab
+        real(kind=prec), dimension(1:2) :: v_ab
+        real(kind=prec), dimension(1:2) :: x_ab
         real(kind=prec) :: v_dot_x
         real(kind=prec) :: x_dot_x
         real(kind=prec) :: eta2
