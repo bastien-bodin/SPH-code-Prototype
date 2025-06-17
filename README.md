@@ -1,2 +1,3 @@
 # SPH-code
-SPH code for Titan flows
+
+First prototype for making SPH Simulations. Test with a Dam Break problem.
