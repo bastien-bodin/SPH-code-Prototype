@@ -3,112 +3,89 @@ module equations
     use particles
     implicit none
 
-    ! here :
-    ! Miscellaneous
-    !   > eval_r -> Returns the distance between two points
-    ! Sound speed
-    !   > CS_IG  -> Compute the sound speed for ideal gas
-    !   > CS_WC  -> Compute the sound speed for weakly compressible fluids
-    ! Pressure
-    !   > P_IG   -> Compute the pressure for ideal gas
-    !   > P_IG   -> Compute the pressure for weakly compressible fluids
+    !> Physical equations for SPH fluid dynamics
+    !> Optimized for Structure of Arrays (SoA) and vectorization.
 
 contains
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-! Miscellaneous
-    function eval_r(xyz1,xyz2) result(r_ab)
-    !> compute the distance between two points
-        real(kind=prec), dimension(1:3) :: xyz1
-        real(kind=prec), dimension(1:3) :: xyz2
-        real(kind=prec)                 :: r_ab
 
-        r_ab = sqrt((xyz1(1) - xyz2(1))**2 + (xyz1(2) - xyz2(2))**2 + (xyz1(3) - xyz2(3))**2 )
-    end function eval_r
+    ! --- EQUATION OF STATE (EoS) ---
 
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-! Sound speed
-    subroutine CS_IG(Part, integStep)
-    !> Compute the sound speed for ideal gas
-        class(Particle) :: Part
-        integer :: IntegStep
+    !> Ideal Gas Equation of State: P = rho * R * T / M
+    !> Simplified here as P = (gamma-1) * rho * u
+    pure subroutine pressure_ideal_gas(sys, gamma_eos, step)
+        type(ParticleSystem), intent(inout) :: sys
+        real(prec), intent(in)              :: gamma_eos
+        integer,    intent(in)              :: step
+        integer :: p
 
-        Part%c_sound(IntegStep+1) = Part%c_sound(IntegStep)
-    end subroutine CS_IG
+        ! Vectorizable loop
+        do p = 1, sys%nPart
+            sys%pressure(step, p) = (gamma_eos - 1.0_prec) * &
+                                    sys%density(step, p) * &
+                                    sys%u_therm(step, p)
+            
+            ! Sound speed for Ideal Gas: c = sqrt(gamma * P / rho)
+            sys%c_sound(step, p) = sqrt(gamma_eos * sys%pressure(step, p) / &
+                                        sys%density(step, p))
+        end do
+    end subroutine pressure_ideal_gas
 
-    subroutine CS_WC(Part,rho_0,c_0,state_gamma, integStep)
-    !> Compute the sound speed for weakly compressible fluids
-        class(Particle) :: Part
-        real(kind=prec), intent(in)       :: rho_0
-        real(kind=prec), intent(in)       :: c_0
-        real(kind=prec), intent(in)       :: state_gamma
-        integer :: IntegStep
 
-        Part%c_sound(IntegStep+1) = c_0 * SQRT( (Part%density(IntegStep+1)/rho_0)**(state_gamma-1) )
-    end subroutine CS_WC
+    !> Weakly Compressible Equation of State (Tait's Equation)
+    !> P = B * ((rho/rho_0)^gamma - 1)
+    pure subroutine pressure_wc(sys, rho_0, c_0, gamma_eos, step)
+        type(ParticleSystem), intent(inout) :: sys
+        real(prec), intent(in)              :: rho_0, c_0, gamma_eos
+        integer,    intent(in)              :: step
+        real(prec) :: B
+        integer :: p
 
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-! Pressure
-    subroutine P_IG(Part,rho_0,molMass, integStep)
-    !> Compute the pressure for ideal gas
-        class(Particle) :: Part
-        real(kind=prec), intent(in) :: rho_0
-        real(kind=prec), intent(in) :: molMass
-        integer :: IntegStep
+        ! Stiffening parameter B
+        B = rho_0 * c_0**2 / gamma_eos
 
-        Part%pressure(IntegStep+1) = (part%density(IntegStep+1) / rho_0 - 1) * idealGasCst * 293.15d0 / molMass
-    end subroutine P_IG
+        do p = 1, sys%nPart
+            sys%pressure(step, p) = B * ((sys%density(step, p) / rho_0)**gamma_eos - 1.0_prec)
+            
+            ! Sound speed for WC: c = c_0 * (rho/rho_0)^((gamma-1)/2)
+            sys%c_sound(step, p) = c_0 * (sys%density(step, p) / rho_0)**((gamma_eos - 1.0_prec) / 2.0_prec)
+        end do
+    end subroutine pressure_wc
 
-    subroutine P_WC(Part,c_0,rho_0,state_gamma, integStep)
-    !> Compute the pressure for weakly compressible fluid
-        class(Particle) :: Part
-        real(kind=prec), intent(in)       :: rho_0
-        real(kind=prec), intent(in)       :: c_0
-        real(kind=prec), intent(in)       :: state_gamma
-        integer :: IntegStep
 
-        real(kind=prec) :: B
+    ! --- ARTIFICIAL VISCOSITY ---
 
-        B = c_0**2 * rho_0/state_gamma
+    !> Monaghan-type Artificial Viscosity
+    !> Computes the term Pi_ab for the momentum equation
+    pure function compute_art_visc(sys, a, b, alpha, beta, step) result(pi_ab)
+        type(ParticleSystem), intent(in) :: sys
+        integer, intent(in)              :: a, b ! Indices of particles
+        real(prec), intent(in)           :: alpha, beta
+        integer, intent(in)              :: step
+        real(prec)                       :: pi_ab
 
-        Part%pressure(IntegStep+1) = B * ((Part%density(IntegStep+1)/rho_0)**state_gamma - 1)
-    end subroutine P_WC
-
-    function ArtVisc(Part, Neigh, alpha, beta, IntegStep) result(pi_ab)
-        class(Particle) :: Part
-        class(Particle) :: Neigh
-        real(kind=prec) :: alpha
-        real(kind=prec) :: beta
-        integer :: IntegStep
-        real(kind=prec) :: pi_ab
-
-        real(kind=prec) :: mu_ab = 0.0d0
-        real(kind=prec), dimension(1:2) :: v_ab
-        real(kind=prec), dimension(1:2) :: x_ab
-        real(kind=prec) :: v_dot_x
-        real(kind=prec) :: x_dot_x
-        real(kind=prec) :: eta2
-        real(kind=prec) :: c_ab
-        real(kind=prec) :: rho_ab
-
-        v_ab = Part%velocity(:,IntegStep) - Neigh%velocity(:,IntegStep)
-        x_ab = Part%coords(:,IntegStep) - Neigh%coords(:,IntegStep)
-        v_dot_x = dot_product(v_ab,x_ab)
-        x_dot_x = dot_product(x_ab,x_ab)
-        eta2 = 0.01d0 * Part%h_part**2.0d0
-
-        if (v_dot_x < 0) then
-            mu_ab = Part%h_part * v_dot_x/(x_dot_x + eta2)
-            c_ab = 0.5d0 * (Part%c_sound(IntegStep) + Neigh%c_sound(IntegStep))
-            rho_ab = 0.5d0 * (Part%density(IntegStep) + Neigh%density(IntegStep))
-            pi_ab = (-alpha * c_ab * mu_ab + beta * mu_ab**2.0d0)/rho_ab
-        else
-            pi_ab = 0.0d0
+        real(prec) :: v_dot_x, x_dot_x, h_ab, c_ab, rho_ab, mu_ab
+        real(prec) :: v_ab(nDim), x_ab(nDim)
+        
+        pi_ab = 0.0_prec
+        
+        ! Relative velocity and position
+        v_ab = sys%velocity(:, step, a) - sys%velocity(:, step, b)
+        x_ab = sys%coords(:, step, a) - sys%coords(:, step, b)
+        
+        v_dot_x = dot_product(v_ab, x_ab)
+        
+        ! Only apply viscosity for particles approaching each other
+        if (v_dot_x < 0.0_prec) then
+            x_dot_x = dot_product(x_ab, x_ab)
+            h_ab   = 0.5_prec * (sys%h_part(a) + sys%h_part(b))
+            c_ab   = 0.5_prec * (sys%c_sound(step, a) + sys%c_sound(step, b))
+            rho_ab = 0.5_prec * (sys%density(step, a) + sys%density(step, b))
+            
+            ! Viscosity parameter mu_ab
+            mu_ab = (h_ab * v_dot_x) / (x_dot_x + 0.01_prec * h_ab**2)
+            
+            pi_ab = (-alpha * c_ab * mu_ab + beta * mu_ab**2) / rho_ab
         end if
-
-        if ((IntegStep == 1) .and. (mu_ab > Part%max_mu_ab)) then
-            Part%max_mu_ab = mu_ab
-        end if
-
-    end function ArtVisc
+    end function compute_art_visc
 
 end module equations

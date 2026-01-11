@@ -1,32 +1,69 @@
-#compiler
+# Compiler settings
 FC = gfortran
 
-# compile flags
-FCFLAGS = -g -c -fdefault-real-8 -fbacktrace -fno-align-commons -O3
-# link flags
-FLFLAGS = -g -fbacktrace
+# Base flags (Common to both versions)
+# -O3: High optimization
+# -march=native: Optimize for the current CPU
+FFLAGS_BASE = -O3 -march=native -Wall
 
+# --- OpenMP Toggle Logic ---
+# Usage: 
+#   make OMP=1 (default, parallel)
+#   make OMP=0 (serial)
+OMP ?= 1
 
-# edition de liens
-main: main.o parameters.o particles.o kernels.o sort_parts.o equations.o get_neighbours.o application.o
-	$(FC) -o main-Verlet.x *.o -fopenmp
-# compilation
-main.o: main.f90 application.o
-	$(FC) $(FCFLAGS) main.f90
-application.o: application.f90 get_neighbours.o sort_parts.o equations.o kernels.o particles.o parameters.o
-	$(FC) $(FCFLAGS) application.f90 -fopenmp
-get_neighbours.o: get_neighbours.f90 sort_parts.o equations.o particles.o parameters.o
-	$(FC) $(FCFLAGS) get_neighbours.f90
-equations.o: equations.f90 particles.o parameters.o
-	$(FC) $(FCFLAGS) equations.f90
-sort_parts.o: sort_parts.f90 particles.o parameters.o
-	$(FC) $(FCFLAGS) sort_parts.f90
-kernels.o: kernels.f90 parameters.o
-	$(FC) $(FCFLAGS) kernels.f90
-particles.o: particles.f90 parameters.o
-	$(FC) $(FCFLAGS) particles.f90
-parameters.o: parameters.f90
-	$(FC) $(FCFLAGS) parameters.f90
+ifeq ($(OMP), 1)
+    FFLAGS = $(FFLAGS_BASE) -fopenmp
+    msg = "Building PARALLEL version (OpenMP enabled)"
+else
+    FFLAGS = $(FFLAGS_BASE)
+    msg = "Building SERIAL version (OpenMP disabled)"
+endif
+
+# Source files
+SRCS = parameters.f90 \
+       particles.f90 \
+       kernels.f90 \
+       sort_parts.f90 \
+       get_neighbours.f90 \
+       equations.f90 \
+       density.f90 \
+       forces.f90 \
+       integrator.f90 \
+       geometries.f90 \
+       application.f90 \
+       main.f90
+
+OBJS = $(SRCS:.f90=.o)
+TARGET = sph_europa
+
+all: info $(TARGET)
+
+info:
+	@echo "------------------------------------------"
+	@echo $(msg)
+	@echo "FFLAGS: $(FFLAGS)"
+	@echo "------------------------------------------"
+
+$(TARGET): $(OBJS)
+	$(FC) $(FFLAGS) -o $@ $(OBJS)
+
+%.o: %.f90
+	$(FC) $(FFLAGS) -c $<
+
+# Dependencies (Order matters for .mod files)
+particles.o: parameters.o
+kernels.o: parameters.o
+sort_parts.o: parameters.o particles.o
+get_neighbours.o: parameters.o particles.o sort_parts.o
+equations.o: parameters.o particles.o
+density.o: parameters.o particles.o kernels.o
+forces.o: parameters.o particles.o kernels.o equations.o
+integrator.o: parameters.o particles.o
+geometries.o: parameters.o particles.o
+application.o: parameters.o particles.o sort_parts.o get_neighbours.o \
+               kernels.o equations.o density.o forces.o integrator.o geometries.o
+main.o: application.o
 
 clean:
-	rm *.o *.mod *.x
+	rm -f $(OBJS) *.mod $(TARGET) output_*.csv

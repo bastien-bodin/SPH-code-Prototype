@@ -5,786 +5,197 @@ module application
     use get_neighbours
     use kernels
     use equations
-    use omp_lib
+    use density
+    use forces
+    use integrator
+    use geometries
     implicit none
 
+    !> Principal controller for the SPH simulation
+    !> Handles initialization, time-stepping, and data management
     type :: SPH_App
-        type(ParticleSort)  :: srt ! sorting machine
-        type(listPA)        :: part ! array of pointers toward particles
-        integer             :: numFP ! number of fixed particles
-        integer             :: numMP ! number of mobile particles
-        integer             :: numPart ! total number of particles
-        real(kind=prec)     :: alpha ! weight. fact. in the art. viscosity formulation
-        real(kind=prec)     :: beta  ! weight. fact. in the art. viscosity formulation
-        integer             :: eqnstate ! -> 1 : ideal gas, -> 2 : WC fluid
-        real(kind=prec)     :: state_gamma ! power in EoS for WC fluids (often taken as 7)
-        real(kind=prec)     :: molMass ! molar mass for ideal gas
-        logical             :: kernelCorrection ! -> false : no correction, -> true : correction
-        real(kind=prec)     :: maxTime  ! simulation time (in seconds)
-        real(kind=prec)     :: saveInt  ! saving interval (in seconds)
-        real(kind=prec)     :: timeStep ! time step (adaptive, in seconds)
-        real(kind=prec)     :: currentTime ! current time (in seconds)
-        integer             :: neededStep ! steps needed for computation (Euler : 1, Verlet/RK : 2/4)
-        real(kind=prec)     :: h_0 ! initial smoothing length
-        real(kind=prec)     :: rho_0 ! density of the fluid at free surface
-        real(kind=prec)     :: c_0 ! sound speed in normal conditions
-        real(kind=prec)     :: dom_dim ! dimensions of the domains
-        integer             :: ite
-        integer             :: dim_ ! dimension of the problem (1D,2D or 3D)
-        real(kind=prec)     :: startTime, stopTime
-        integer,dimension(8):: date_time
-        character (len=10), dimension(3)  :: b
-    contains
-        procedure, public :: initialisation
-        procedure, public :: solver
-        procedure, private :: timeStepUpdate
-        procedure, private :: slUpdate
-        procedure, private :: RK22
-        procedure, private :: SyplVerlet
-        procedure, private :: Verlet
-    end type SPH_App
-    
-contains
-    subroutine initialisation(self)
-        !! read param/fp/mp files and initialises the working environment
-        class(SPH_App), target :: self
-        character(len=250) :: param_path ! path of the parameters file
-        character(len=250) :: fp_path    ! path of the fixed particles file
-        character(len=250) :: mp_path    ! path of the mobile particles file
-        real(kind=prec) :: x,z           ! coords of a particle
-        real(kind=prec) :: v_x,v_z       ! velocity of a particle
-        real(kind=prec) :: rho, m        ! density/mass of a particle
-        real(kind=prec) :: u             ! thermal energy of a particle
-        class(ParticleArray), pointer :: p_part ! pointer toward a particle
-
-        integer :: i ! loop counter
-
-        call cpu_time(self%startTime)
-
-        self%timeStep = 1E-15 ! initialise time step
-        self%currentTime = 0.0d0 ! initialise current time
-
-        !> reading paths for init files
-        open(unit=1,file='paths.txt')
-        read(1,*) param_path
-        read(1,*) fp_path
-        read(1,*) mp_path
-        close(unit=1)
-
-        !> reading and storing parameters for the simulation
-        open(unit=2, file=trim(param_path))
-        read(2,*) self%dim_
-        read(2,*) self%numFP
-        read(2,*) self%numMP
-        read(2,*) self%h_0
-        read(2,*) self%c_0
-        read(2,*) self%rho_0
-        read(2,*) self%dom_dim
-        read(2,*) self%alpha
-        read(2,*) self%beta
-        read(2,*) self%eqnstate
-        read(2,*) self%state_gamma
-        read(2,*) self%molMass
-        read(2,*) self%kernelCorrection
-        read(2,*) self%maxTime
-        read(2,*) self%saveInt
-        close(unit=2)
-
-        !> allocate space for the list of particles
-        self%numPart = self%numFP + self%numMP
-        allocate(self%part%lst_PA(1:self%numPart))
-        self%part%nb_elts = self%numPart
-
-        !> read file for fixed particles
-        open(unit=3,file=trim(fp_path))
-        do i = 1, self%numFP
-            read(3,*) x,z,v_x,v_z,rho,m,u
-            allocate(self%part%lst_PA(i)%PTR)
-            p_part => self%part%lst_PA(i)%PTR
-            p_part%Part%coords = 0.0d0
-            p_part%Part%coords(1,1) = x
-            p_part%Part%coords(2,1) = z
-            p_part%Part%velocity = 0.0d0
-            p_part%Part%velocity(1,1) = v_x
-            p_part%Part%velocity(2,1) = v_z
-            p_part%Part%density = 0.0d0
-            p_part%Part%density(1) = rho
-            p_part%Part%mass = m
-            p_part%Part%h_part = self%h_0
-            p_part%Part%u_therm = 0.0d0
-            p_part%Part%u_therm(1) = u
-            p_part%Part%pressure = 0.0d0
-            p_part%Part%c_sound = self%c_0
-            if (self%eqnstate == 1) then
-                call P_IG(p_part%Part,self%rho_0,self%molMass, 1)
-                call CS_IG(p_part%Part, 1)
-            else
-                call P_WC(p_part%Part,self%c_0,self%rho_0, self%state_gamma, 1)
-                call CS_WC(p_part%Part,self%rho_0, self%c_0, self%state_gamma, 1)
-            end if
-            p_part%Part%mobile = .false.
-            !call p_part%lst_neigh%initList()
-        end do
-        close(unit=3)
-
-        !> read file for mobile particles
-        open(unit=4,file=trim(mp_path))
-        do i = 1, self%numMP
-            read(4,*) x,z,v_x,v_z,rho,m,u
-            allocate(self%part%lst_PA(self%numFP+i)%PTR)
-            p_part => self%part%lst_PA(self%numFP+i)%PTR
-            p_part%Part%coords = 0.0d0
-            p_part%Part%coords(1,1) = x
-            p_part%Part%coords(2,1) = z
-            p_part%Part%velocity = 0.0d0
-            p_part%Part%velocity(1,1) = v_x
-            p_part%Part%velocity(2,1) = v_z
-            p_part%Part%density = 0.0d0
-            p_part%Part%density(1) = rho
-            p_part%Part%mass = m
-            p_part%Part%h_part = self%h_0
-            p_part%Part%u_therm = 0.0d0
-            p_part%Part%u_therm(1) = u
-            p_part%Part%pressure = 0.0d0
-            p_part%Part%c_sound = self%c_0
-            if (self%eqnstate == 1) then
-                call P_IG(p_part%Part,self%rho_0,self%molMass, 1)
-                call CS_IG(p_part%Part, 1)
-            else
-                call P_WC(p_part%Part,self%c_0,self%rho_0, self%state_gamma, 1)
-                call CS_WC(p_part%Part,self%rho_0, self%c_0, self%state_gamma, 1)
-            end if
-            p_part%Part%mobile = .true.
-            !call p_part%lst_neigh%initList()
-        end do
-        close(unit=4)
+        type(ParticleSystem) :: sys
+        type(ParticleSort)   :: srt
         
-        !call self%srt%setCells(self%dom_dim,2,self%part)
-        self%ite = 0
+        ! Simulation timing and control
+        real(prec) :: dt          = 0.0005_prec
+        real(prec) :: maxTime     = 2.0_prec
+        real(prec) :: currentTime = 0.0_prec
+        integer    :: currentIt   = 0
+        integer    :: saveInt     = 50    ! Save every N iterations
+        
+        ! Physics parameters for Europa cryovolcanism
+        real(prec) :: alpha       = 0.1_prec  ! Artificial Viscosity alpha
+        real(prec) :: beta        = 0.0_prec  ! Artificial Viscosity beta
+        real(prec) :: rho0        = 1000.0_prec
+        real(prec) :: c0          = 15.0_prec ! Reference speed of sound
+        real(prec) :: gamma_eos   = 7.0_prec  ! EoS stiffening parameter
+        real(prec) :: dom_dim     = 2.0_prec  ! Domain dimension (square/cube)
+        
+    contains
+        procedure :: run_simulation
+        procedure :: solve_one_step
+        procedure :: setup_scene
+        procedure :: save_results
+    end type SPH_App
 
-        call cpu_time(self%stopTime)
-        call date_and_time(self%b(1),self%b(2),self%b(3),self%date_time)
+contains
 
-        open(unit=24,file='log.txt',form='formatted',access='stream',status='replace')
-        !> printing on the terminal
-        print*, '-------------------------------------------------------------'
-        print*, '|                SPH code -- 2D Version                     |'
-        print*, '|           Date: ',self%b(1)(7:8),'/',self%b(1)(5:6),'/',self%b(1)(1:4),&
-                &' at ',self%b(2)(1:2),':',self%b(2)(3:4),':',self%b(2)(5:6),' UTC',self%b(3)(1:3),'             |'
-        print*, '-------------------------------------------------------------'
-        print*,''
-        print*, 'Initialisation done in: ', self%stopTime-self%startTime, 's'
-        print*, 'Parameters of the simulation'
-        print*, 'Number of fixed particles  :',self%numFP
-        print*, 'Number of mobile particles :',self%numMP
-        print*, 'h0                         :',self%h_0
-        print*, 'c0                         :',self%c_0
-        print*, 'rho_0                      :',self%rho_0
-        print*, 'alpha                      :',self%alpha
-        print*, 'beta                       :',self%beta
-        print*, 'Equation of state          :',self%eqnstate
-        print*, 'Gamma                      :',self%state_gamma
-        print*, 'Molar Mass                 :',self%molMass
-        print*, 'Kernel correction          :',self%kernelCorrection
-        print*, 'Simulation time (s)        :',self%maxTime
-        print*, 'Time Step for saving (s)   :',self%saveInt
-        print*,''
-        !> saving in log file
-        write(24,*) '-------------------------------------------------------------'
-        write(24,*) '|                SPH code -- 2D Version                     |'
-        write(24,*) '|           Date: ',self%b(1)(7:8),'/',self%b(1)(5:6),'/',self%b(1)(1:4),&
-                &' at ',self%b(2)(1:2),':',self%b(2)(3:4),':',self%b(2)(5:6),' UTC',self%b(3)(1:3),'             |'
-        write(24,*) '-------------------------------------------------------------'
-        write(24,*)''
-        write(24,*) 'Initialisation done in: ', self%stopTime-self%startTime, 's'
-        write(24,*) 'Parameters of the simulation'
-        write(24,*) 'Number of fixed particles  :',self%numFP
-        write(24,*) 'Number of mobile particles :',self%numMP
-        write(24,*) 'h0                         :',self%h_0
-        write(24,*) 'c0                         :',self%c_0
-        write(24,*) 'rho_0                      :',self%rho_0
-        write(24,*) 'alpha                      :',self%alpha
-        write(24,*) 'beta                       :',self%beta
-        write(24,*) 'Equation of state          :',self%eqnstate
-        write(24,*) 'Gamma                      :',self%state_gamma
-        write(24,*) 'Molar Mass                 :',self%molMass
-        write(24,*) 'Kernel correction          :',self%kernelCorrection
-        write(24,*) 'Simulation time (s)        :',self%maxTime
-        write(24,*) 'Time Step for saving (s)   :',self%saveInt
-        write(24,*) ''
-
-    end subroutine initialisation
-
-    subroutine solver(self)
-        !! solves the problem, given the initial setup
+    !> 1. Setup the initial scene (Dam Break on Europa)
+    subroutine setup_scene(self)
         class(SPH_App) :: self
+        real(prec) :: spacing, h0, y_top, y_part, p_init, rho_init, B, g_abs
+        integer    :: i, s
+        
+        ! --- Physical Configuration (Earth Dam-Break) ---
+        spacing = 0.04_prec
+        h0      = 1.2_prec * spacing
+        self%rho0      = 1000.0_prec
+        self%c0        = 65.0_prec
+        self%gamma_eos = 7.0_prec
+        self%dt        = 0.0001_prec
+        
+        call self%sys%init(40000)
+        call self%srt%init(self%dom_dim, h0, KAPPA_CUBIC)
+        
+        ! Generate geometry
+        call setup_dam_break(self%sys, 4.0_prec, 3.0_prec, &
+                             1.0_prec, 2.0_prec, spacing, h0)
+                             
+        ! --- Hydrostatic Initialization ---
+        ! Top of the fluid column is at y_start + H_fluid
+        y_top = (0.5_prec * spacing) + 2.0_prec
+        ! Tait Equation constant B = (rho0 * c0^2) / gamma
+        B = (self%rho0 * self%c0**2) / self%gamma_eos
+        g_abs = abs(G_VEC(nDim))
 
-        integer :: i,j
-        integer :: ite      ! iteration counter
-        logical :: to_save  ! saving flag; if true -> save
-
-        ite = 0
-
-        call cpu_time(self%startTime)
-
-        open(unit=22, file='result-Verlet.out', form='unformatted',status='replace')! ,access='stream'
-        open(unit=23, file='time-Verlet.out', form='unformatted',status='replace') ! , access='stream'
-
-        !> time increment + saving status
-        do while (self%currentTime <= self%maxTime)
-            if ((floor(self%currentTime/self%saveInt) /= floor((self%currentTime+self%timeStep)/self%saveInt)) &
-                & .or. self%ite == 0) then
-                to_save = .true.
-                ite = ite + 1
+        do i = 1, self%sys%nPart
+            y_part = self%sys%coords(nDim, 1, i)
+            
+            ! 1. Compute Hydrostatic Pressure: P = rho * g * depth
+            if (y_part < y_top) then
+                p_init = self%rho0 * g_abs * (y_top - y_part)
             else
-                to_save = .false.
-            end if
-            self%currentTime = self%currentTime + self%timeStep
-            !> update X,V,rho,u,cs,p
-            self%neededStep = 2
-            do j=1,self%neededStep
-                call self%srt%setCells(self%dom_dim,1,self%part)
-                call self%srt%particle_sort(self%dom_dim,self%part)
-                !$OMP PARALLEL DO PRIVATE(i) SCHEDULE(DYNAMIC)
-                do i = 1, self%numPart
-                    !> solving method (Euler, Verlet, RK)
-                    ! call RK22(self,self%part%lst_PA(i)%PTR,j)
-                    call SyplVerlet(self,self%part%lst_PA(i)%PTR,j)
-                    ! call Verlet(self,self%part%lst_PA(i)%PTR,j)
-                end do
-                !$OMP END PARALLEL DO
-                do i=1, self%srt%nCells
-                    if (self%srt%LCells(i)%nb_elts /= 0) then
-                        call self%srt%LCells(i)%resetListPA()
-                    end if
-                end do
-                deallocate(self%srt%LCells)
-            end do
-
-            !> update the current time variables (current time = next time)
-            do i=1,self%numPart
-                self%part%lst_PA(i)%PTR%Part%density(1) = self%part%lst_PA(i)%PTR%Part%density(self%neededStep+1)
-                self%part%lst_PA(i)%PTR%Part%pressure(1) = self%part%lst_PA(i)%PTR%Part%pressure(self%neededStep+1)
-                self%part%lst_PA(i)%PTR%Part%c_sound(1) = self%part%lst_PA(i)%PTR%Part%c_sound(self%neededStep+1)
-                self%part%lst_PA(i)%PTR%Part%u_therm(1) = self%part%lst_PA(i)%PTR%Part%u_therm(self%neededStep+1)
-                self%part%lst_PA(i)%PTR%Part%coords(:,1) = self%part%lst_PA(i)%PTR%Part%coords(:,self%neededStep+1)
-                self%part%lst_PA(i)%PTR%Part%velocity(:,1) = self%part%lst_PA(i)%PTR%Part%velocity(:,self%neededStep+1)
-            end do
-
-
-
-            !> saving data at given intervals
-            if (to_save) then
-                !> saving parts
-                do i = 1,self%numMP
-                    write(unit=22) real(self%part%lst_PA(self%numFP+i)%PTR%Part%coords(1,1),4), &
-                    & real(self%part%lst_PA(self%numFP+i)%PTR%Part%coords(2,1),4), &
-                    & real(self%part%lst_PA(self%numFP+i)%PTR%Part%velocity(1,1),4), &
-                    & real(self%part%lst_PA(self%numFP+i)%PTR%Part%velocity(2,1),4), &
-                    & real(self%part%lst_PA(self%numFP+i)%PTR%Part%pressure(1),4), &
-                    & real(self%part%lst_PA(self%numFP+i)%PTR%Part%density(1),4), &
-                    & real(self%part%lst_PA(self%numFP+i)%PTR%Part%u_therm(1),4)
-                end do
-                !> saving time
-                write(unit=23) real(self%currentTime,4)
-                print*, 'Iteration nb:   ',self%ite
-                print*, 'Time (s) =      ',self%currentTime
-                print*, 'Time step (s) = ',self%timeStep
-                write(24,*) 'Iteration nb:   ',self%ite
-                write(24,*) 'Time (s) =      ',self%currentTime
-                write(24,*) 'Time step (s) = ',self%timeStep
-            end if
-            call self%timeStepUpdate
-            !self%timeStep = 1e-4
-            !call self%slUpdate
-            self%ite = self%ite +1
-        end do
-
-        call cpu_time(self%stopTime)
-
-        print*,'Recap:'
-        print*,'Number of iteration: ', self%ite
-        print*,'Simulation time (s): ', self%currentTime
-        print*,'Computation time (s):', self%stopTime-self%startTime
-        print*,'Number of saving    :', ite
-        write(24,*)'Recap:'
-        write(24,*)'Number of iteration: ', self%ite
-        write(24,*)'Simulation time (s): ', self%currentTime
-        write(24,*)'Computation time (s):', self%stopTime-self%startTime
-        write(24,*)'Number of saving    :', ite
-
-        close(22)
-        close(23)
-        close(24)
-
-        call self%part%resetListPA()
-    end subroutine solver
-
-    subroutine timeStepUpdate(self)
-        !> compute the adaptive time step (c.f. dualSPHysics)
-        class(SPH_App) :: self
-
-        real(kind=prec) :: dt_f, dt_ftemp
-        real(kind=prec) :: dt_cv, dt_cvtemp
-        integer :: i
-        class(ParticleArray), pointer :: p_part
-        real(kind=prec), dimension(1:2) :: a !  acceleration
-        real(kind=prec) :: f_m ! F/M -> acceleration norm
-        real(kind=prec) :: h
-        real(kind=prec) :: c_s, max_mu
-
-        a = self%part%lst_PA(self%numFP+1)%PTR%Part%acceler(:)
-        h = self%part%lst_PA(self%numFP+1)%PTR%Part%h_part
-        f_m = sqrt(a(1)**2 + a(2)**2)
-        c_s = self%part%lst_PA(self%numFP+1)%PTR%Part%c_sound(1)
-        max_mu = self%part%lst_PA(self%numFP+1)%PTR%Part%max_mu_ab
-
-        !> compute the time_step
-        dt_f = sqrt(h/f_m)
-        dt_cv = h/(c_s+max_mu)
-        do i = self%numFP+2, self%numPart
-            p_part => self%part%lst_PA(i)%PTR
-            h = p_part%Part%h_part
-            a = p_part%Part%acceler(:)
-            f_m = sqrt(a(1)**2 + a(2)**2)
-            dt_ftemp = sqrt(h/f_m)
-            if (dt_ftemp < dt_f) then
-                dt_f = dt_ftemp
-            end if
-            c_s = p_part%Part%c_sound(1)
-            max_mu = p_part%Part%max_mu_ab
-            dt_cvtemp = h/(c_s+max_mu)
-            if (dt_cvtemp< dt_cv) then
-                dt_cv = dt_cvtemp
-            end if
-        end do
-        self%timeStep = 0.3 * min(dt_f,dt_cv)
-    end subroutine timeStepUpdate
-
-    subroutine slUpdate(self)
-        !> computes the new smoothing length at each time step (same h for every particle)
-        class(SPH_App) :: self
-
-        real(kind=prec) :: rho_mean
-        real(kind=prec) :: h_new
-        integer :: i
-
-        rho_mean = 0.0d0
-
-        do i=1,self%numPart
-            rho_mean = rho_mean + self%part%lst_PA(i)%PTR%Part%density(1)
-        end do
-        rho_mean = rho_mean/self%numPart
-
-        h_new = self%h_0*(self%rho_0/rho_mean)**(1.0d0/self%dim_)
-        if (h_new > 0.5d0 * self%srt%CellSize) then
-            h_new = 0.5d0 * self%srt%CellSize
-            print*, 'Warning: the new h has been limited'
-            write(24,*) 'Warning: the new h has been limited'
-        end if
-        do i=1,self%numPart
-            self%part%lst_PA(i)%PTR%Part%h_part = h_new
-        end do
-    end subroutine slUpdate
-
-    subroutine RK22(self, PartArray, integStep)
-        !> Updates time dependent variables with the RK22 time integration
-        class(SPH_App) :: self
-        class(ParticleArray) :: PartArray
-        integer :: integStep
-
-        type(Quintic) :: KernL
-        real(kind=prec) :: r_ab
-
-        real(kind=prec), dimension(:,:), allocatable :: vec_gradW
-
-        real(kind=prec) :: D_rho
-        real(kind=prec) :: D_u
-        real(kind=prec), dimension(1:2) :: D_v
-        real(kind=prec), dimension(1:2) :: D_x
-        real(kind=prec), dimension(1:2) :: v_ab
-        real(kind=prec), dimension(1:2) :: F_m
-        real(kind=prec), dimension(1:2) :: D_ra
-        real(kind=prec) :: pi_ab
-        integer :: i
-        class(Particle), pointer :: p_neigh
-
-        D_rho = 0.0d0
-        D_u = 0.0d0
-        D_v = (/0.0d0,0.0d0/)
-        D_x = (/0.0d0,0.0d0/)
-        D_ra= (/0.0d0,0.0d0/)
-        F_m = (/real(0,prec),real(-9.81,prec)/)
-
-        call KernL%init_quint(PartArray%Part%h_part,self%dim_)
-
-        call getNeighbours(PartArray,self%srt,self%dom_dim,KernL%kappa, integStep)
-
-        allocate(vec_gradW(1:3,1:PartArray%lst_neigh%nb_elts))
-        do i = 1, PartArray%lst_neigh%nb_elts
-            p_neigh => PartArray%lst_neigh%lst_parts(i)%PTR
-            r_ab = eval_r(PartArray%Part%coords(:,integStep),p_neigh%coords(:,integStep))
-            KernL%r_ab = r_ab
-            KernL%q = KernL%r_ab/KernL%h
-            call KernL%kernel_quint()
-            call KernL%dwdq_quint()
-            vec_gradW(:,i) = (PartArray%Part%coords(:,integStep) - p_neigh%coords(:,integStep))/r_ab * KernL%dw
-        end do
-        if (integStep == 1) then
-            PartArray%Part%max_mu_ab = 0.0d0
-        end if
-
-        do i = 1, PartArray%lst_neigh%nb_elts
-            p_neigh => PartArray%lst_neigh%lst_parts(i)%PTR
-            v_ab(:) = PartArray%Part%velocity(:,integStep) - p_neigh%velocity(:,integStep)
-            ! Artificial Viscosity
-            pi_ab = ArtVisc(PartArray%Part,p_neigh, self%alpha, self%beta, integStep)
-            ! D_rho/Dt
-            D_rho = D_rho + p_neigh%mass * dot_product(v_ab,vec_gradW(:,i))
-            if (PartArray%Part%mobile) then
-                ! Dv/Dt
-                D_v = D_v + p_neigh%mass * &
-                    & (p_neigh%pressure(integStep)/(p_neigh%density(integStep)**2.0d0) + &
-                    & PartArray%Part%pressure(integStep)/(PartArray%Part%density(integStep)**2.0d0) + &
-                    & pi_ab) * vec_gradW(:,i)
-                ! XSPH correction
-                D_ra = D_ra + p_neigh%mass/(p_neigh%density(integStep) + PartArray%Part%density(integStep)) *&
-                    & v_ab(:) * KernL%W
-            end if
-            ! Thermal Energy
-            D_u = D_u + 0.5d0 * PartArray%Part%mass * &
-                & (p_neigh%pressure(integStep)/(p_neigh%density(integStep)**2.0d0) + &
-                & PartArray%Part%pressure(integStep)/(PartArray%Part%density(integStep)**2.0d0) + &
-                & pi_ab) * dot_product(v_ab,vec_gradW(:,i))
-        end do
-        if (PartArray%Part%mobile) then
-            D_v = -D_v + F_m
-        end if
-        if (integStep == 1) then
-            PartArray%Part%density(2) = PartArray%Part%density(1) + D_rho * self%timeStep
-            PartArray%Part%density(3) = PartArray%Part%density(1) + D_rho * self%timeStep/2.0d0
-            PartArray%Part%u_therm(2) = PartArray%Part%u_therm(1) + D_u * self%timeStep
-            PartArray%Part%u_therm(3) = PartArray%Part%u_therm(1) + D_u * self%timeStep/2.0d0
-            if (PartArray%Part%mobile) then
-                PartArray%Part%acceler(:) = D_v
-                PartArray%Part%velocity(:,2) = PartArray%Part%velocity(:,1) + D_v * self%timeStep
-                PartArray%Part%velocity(:,3) = PartArray%Part%velocity(:,1) + D_v * self%timeStep/2.0d0
-                D_x = PartArray%Part%velocity(:,1) + D_ra
-                PartArray%Part%coords(:,2) = PartArray%Part%coords(:,1) + D_x * self%timeStep
-                PartArray%Part%coords(:,3) = PartArray%Part%coords(:,1) + D_x * self%timeStep/2.0d0
-            else
-                PartArray%Part%velocity(:,2) = PartArray%Part%velocity(:,1)
-                PartArray%Part%coords(:,2) = PartArray%Part%coords(:,1)
-            end if
-        else
-            PartArray%Part%density(3) = PartArray%Part%density(3) + D_rho * self%timeStep/2.0d0
-            PartArray%Part%u_therm(3) = PartArray%Part%u_therm(3) + D_u * self%timeStep/2.0d0
-            if (PartArray%Part%mobile) then
-                PartArray%Part%acceler(:) = (D_v + PartArray%Part%acceler(:))/2.0d0
-                PartArray%Part%velocity(:,3) = PartArray%Part%velocity(:,3) + D_v * self%timeStep/2.0d0
-                D_x = PartArray%Part%velocity(:,2) + D_ra
-                PartArray%Part%coords(:,3) = PartArray%Part%coords(:,3) + D_x * self%timeStep/2.0d0 
-            else
-                PartArray%Part%velocity(:,3) = PartArray%Part%velocity(:,2)
-                PartArray%Part%coords(:,3) = PartArray%Part%coords(:,2)
+                p_init = 0.0_prec
             end if
             
-        end if
-
-        call P_WC(PartArray%Part,self%c_0,self%rho_0,self%state_gamma, integStep)
-        call CS_WC(PartArray%Part,self%rho_0,self%c_0,self%state_gamma, integStep)
-
-        if (PartArray%lst_neigh%nb_elts /= 0) then
-            call PartArray%lst_neigh%resetList()
-        end if
-        deallocate(vec_gradW)
-
-    end subroutine RK22
-
-    subroutine SyplVerlet(self, PartArray, integStep)
-        !> Updates time dependent variables with the Symplectic Verlet algorithm
-        class(SPH_App) :: self
-        class(ParticleArray) :: PartArray
-        integer :: integStep
-
-        type(Cubic) :: KernL
-        real(kind=prec) :: r_ab
-
-        real(kind=prec), dimension(:,:), allocatable :: vec_gradW
-
-        real(kind=prec) :: D_rho
-        real(kind=prec) :: D_u
-        real(kind=prec), dimension(1:2) :: D_v
-        real(kind=prec), dimension(1:2) :: D_x
-        real(kind=prec), dimension(1:2) :: v_ab
-        real(kind=prec), dimension(1:2) :: F_m
-        real(kind=prec), dimension(1:2) :: D_ra
-        real(kind=prec) :: pi_ab
-        integer :: i
-        class(Particle), pointer :: p_neigh
-
-        D_rho = 0.0d0
-        D_u = 0.0d0
-        D_v = (/0.0d0,0.0d0/)
-        D_x = (/0.0d0,0.0d0/)
-        D_ra = (/0.0d0,0.0d0/)
-        F_m = (/real(0,prec),real(-9.81,prec)/)
-
-        call KernL%init_cub(PartArray%Part%h_part,self%dim_)
-
-        call getNeighbours(PartArray,self%srt,self%dom_dim,KernL%kappa, integStep)
-
-        allocate(vec_gradW(1:3,1:PartArray%lst_neigh%nb_elts))
-        do i = 1, PartArray%lst_neigh%nb_elts
-            p_neigh => PartArray%lst_neigh%lst_parts(i)%PTR
-            r_ab = eval_r(PartArray%Part%coords(:,integStep),p_neigh%coords(:,integStep))
-            KernL%r_ab = r_ab
-            KernL%q = KernL%r_ab/KernL%h
-            call KernL%kernel_cub()
-            call KernL%dwdq_cub()
-            vec_gradW(:,i) = (PartArray%Part%coords(:,integStep) - p_neigh%coords(:,integStep))/r_ab * KernL%dw
-        end do
-        
-        if (integStep == 1) then
-            PartArray%Part%max_mu_ab = 0.0d0
-        end if
-
-        do i = 1, PartArray%lst_neigh%nb_elts
-            p_neigh => PartArray%lst_neigh%lst_parts(i)%PTR
-            v_ab(:) = PartArray%Part%velocity(:,integStep) - p_neigh%velocity(:,integStep)
-            ! Artificial viscosity
-            pi_ab = ArtVisc(PartArray%Part,p_neigh, self%alpha, self%beta, integStep)
-            ! D_rho/Dt
-            D_rho = D_rho + p_neigh%mass * dot_product(v_ab,vec_gradW(:,i))
-            if (PartArray%Part%mobile) then
-                ! Dv/Dt
-                D_v = D_v + p_neigh%mass * &
-                    & (p_neigh%pressure(integStep)/(p_neigh%density(integStep)**2.0d0) + &
-                    & PartArray%Part%pressure(integStep)/(PartArray%Part%density(integStep)**2.0d0) + &
-                    & pi_ab) * vec_gradW(:,i)
-                ! XSPH correction
-                D_ra = D_ra + p_neigh%mass/(p_neigh%density(integStep) + PartArray%Part%density(integStep)) *&
-                    & v_ab(:) * KernL%W
-            end if
-            ! Thermal energy
-            D_u = D_u + 0.5d0 * PartArray%Part%mass * &
-                & (p_neigh%pressure(integStep)/(p_neigh%density(integStep)**2.0d0) + &
-                & PartArray%Part%pressure(integStep)/(PartArray%Part%density(integStep)**2.0d0) + &
-                & pi_ab) * dot_product(v_ab,vec_gradW(:,i))
-        end do
-        if (PartArray%Part%mobile) then
-            D_v = -D_v + F_m
-        end if
-
-        if (integStep == 1) then
-            !> half time step
-            PartArray%Part%density(2)  = PartArray%Part%density(1) + self%timeStep/2.0d0 * D_rho
-            PartArray%Part%u_therm(2)  = PartArray%Part%u_therm(1) + self%timeStep/2.0d0 * D_u
-            if (PartArray%Part%mobile) then
-                PartArray%Part%acceler(:) = D_v
-                PartArray%Part%velocity(:,2) = PartArray%Part%velocity(:,1) + self%timeStep/2.0d0 * D_v
-                D_x = PartArray%Part%velocity(:,1) + D_ra
-                PartArray%Part%coords(:,2) = PartArray%Part%coords(:,1) + self%timeStep/2.0d0 * D_x
-            else
-                PartArray%Part%velocity(:,2) = PartArray%Part%velocity(:,1)
-                PartArray%Part%coords(:,2) = PartArray%Part%coords(:,1)
-            end if
-        else
-            !> full time step
-            ! PartArray%Part%density(3) = PartArray%Part%density(1)*(2.0d0 + (D_rho/PartArray%Part%density(2))*self%timeStep )/ &
-            !                 & (2.0d0 - (D_rho/PartArray%Part%density(2))*self%timeStep )
-            PartArray%Part%density(3) = PartArray%Part%density(1) + self%timeStep * D_rho
-            PartArray%Part%u_therm(3) = PartArray%Part%u_therm(1) + self%timeStep * D_u
-
-            if (PartArray%Part%mobile) then
-                PartArray%Part%acceler(:) = D_v
-                PartArray%Part%velocity(:,3) = PartArray%Part%velocity(:,1) + self%timeStep * D_v
-                D_x = (PartArray%Part%velocity(:,3) + PartArray%Part%velocity(:,1))/2.0d0 + D_ra
-                PartArray%Part%coords(:,3) = PartArray%Part%coords(:,1) &
-                    & + self%timeStep * D_x
-            else
-                PartArray%Part%velocity(:,3) = PartArray%Part%velocity(:,1)
-                PartArray%Part%coords(:,3) = PartArray%Part%coords(:,1)
-            end if
-        end if
-
-        call P_WC(PartArray%Part,self%c_0,self%rho_0,self%state_gamma, integStep)
-        call CS_WC(PartArray%Part,self%rho_0,self%c_0,self%state_gamma, integStep)
-
-        if (PartArray%lst_neigh%nb_elts /= 0) then
-            call PartArray%lst_neigh%resetList()
-        end if
-        deallocate(vec_gradW)
-    end subroutine SyplVerlet
-
-    subroutine Verlet(self, PartArray, integStep)
-        !> Updates time dependent variables with the Symplectic Verlet algorithm
-        class(SPH_App) :: self
-        class(ParticleArray) :: PartArray
-        integer :: integStep
-
-        type(Cubic) :: KernL
-        real(kind=prec) :: r_ab
-
-        real(kind=prec), dimension(:,:), allocatable :: vec_gradW
-
-        real(kind=prec) :: D_rho
-        real(kind=prec) :: D_u
-        real(kind=prec), dimension(1:2) :: D_v
-        real(kind=prec), dimension(1:2) :: D_x
-        real(kind=prec), dimension(1:2) :: v_ab
-        real(kind=prec), dimension(1:2) :: F_m
-        real(kind=prec), dimension(1:2) :: D_ra
-        real(kind=prec) :: pi_ab
-        integer :: i
-        class(Particle), pointer :: p_neigh
-
-        D_rho = 0.0d0
-        D_u = 0.0d0
-        D_v = (/0.0d0,0.0d0/)
-        D_x = (/0.0d0,0.0d0/)
-        D_ra = (/0.0d0,0.0d0/)
-        F_m = (/real(0,prec),real(-9.81,prec)/)
-
-        call KernL%init_cub(PartArray%Part%h_part,self%dim_)
-
-        call getNeighbours(PartArray,self%srt,self%dom_dim,KernL%kappa, integStep)
-
-        allocate(vec_gradW(1:3,1:PartArray%lst_neigh%nb_elts))
-        do i = 1, PartArray%lst_neigh%nb_elts
-            p_neigh => PartArray%lst_neigh%lst_parts(i)%PTR
-            r_ab = eval_r(PartArray%Part%coords(:,integStep),p_neigh%coords(:,integStep))
-            KernL%r_ab = r_ab
-            KernL%q = KernL%r_ab/KernL%h
-            call KernL%kernel_cub()
-            call KernL%dwdq_cub()
-            vec_gradW(:,i) = (PartArray%Part%coords(:,integStep) - p_neigh%coords(:,integStep))/r_ab * KernL%dw
-        end do
-        
-        if (integStep == 1) then
-            PartArray%Part%max_mu_ab = 0.0d0
-        end if
-
-        do i = 1, PartArray%lst_neigh%nb_elts
-            p_neigh => PartArray%lst_neigh%lst_parts(i)%PTR
-            v_ab(:) = PartArray%Part%velocity(:,integStep) - p_neigh%velocity(:,integStep)
-            ! Artificial viscosity
-            pi_ab = ArtVisc(PartArray%Part,p_neigh, self%alpha, self%beta, integStep)
-            !> D_rho/Dt
-            D_rho = D_rho + p_neigh%mass * PartArray%Part%density(integStep)/p_neigh%density(integStep)&
-                & * dot_product(v_ab,vec_gradW(:,i))
-            if (PartArray%Part%mobile) then
-                !> Dv/Dt
-                D_v = D_v + p_neigh%mass * &
-                    & ((p_neigh%pressure(integStep)+PartArray%Part%pressure(integStep))/&
-                    & (p_neigh%density(integStep)*PartArray%Part%density(integStep)) + &
-                    & pi_ab) * vec_gradW(:,i)
-                !> XSPH correction
-                ! D_ra = D_ra + p_neigh%mass/(p_neigh%density(integStep) + PartArray%Part%density(integStep)) *&
-                !     & v_ab(:) * KernL%W
-            end if
-            ! Thermal energy
-            D_u = D_u + 0.5d0 * PartArray%Part%mass * &
-                & (p_neigh%pressure(integStep)/(p_neigh%density(integStep)**2.0d0) + &
-                & PartArray%Part%pressure(integStep)/(PartArray%Part%density(integStep)**2.0d0) + &
-                & pi_ab) * dot_product(v_ab,vec_gradW(:,i))
-        end do
-        if (PartArray%Part%mobile) then
-            D_v = -D_v + F_m
-        end if
-
-        if (integStep == 1) then
-            !> half time step
-            PartArray%Part%density(2)  = PartArray%Part%density(1) + self%timeStep/2.0d0 * D_rho
-            PartArray%Part%u_therm(2)  = PartArray%Part%u_therm(1) + self%timeStep/2.0d0 * D_u
-            if (PartArray%Part%mobile) then
-                PartArray%Part%acceler(:) = D_v
-                PartArray%Part%velocity(:,2) = PartArray%Part%velocity(:,1) + self%timeStep/2.0d0 * D_v
-                D_x = PartArray%Part%velocity(:,2) !+ D_ra
-                PartArray%Part%coords(:,2) = PartArray%Part%coords(:,1) + self%timeStep * D_x
-            else
-                PartArray%Part%velocity(:,2) = PartArray%Part%velocity(:,1)
-                PartArray%Part%coords(:,2) = PartArray%Part%coords(:,1)
-            end if
-        else
-            !> full time step
-            PartArray%Part%density(3) = PartArray%Part%density(2) + self%timeStep/2.0d0 * D_rho
-
-            PartArray%Part%u_therm(3) = PartArray%Part%u_therm(2) + self%timeStep/2.0d0 * D_u
-
-            if (PartArray%Part%mobile) then
-                PartArray%Part%acceler(:) = D_v
-                PartArray%Part%velocity(:,3) = PartArray%Part%velocity(:,2) + self%timeStep/2.0d0 * D_v
-                D_x = (PartArray%Part%velocity(:,3) + PartArray%Part%velocity(:,1))/2.0d0 !+ D_ra
-                PartArray%Part%coords(:,3) = PartArray%Part%coords(:,2)
-            else
-                PartArray%Part%velocity(:,3) = PartArray%Part%velocity(:,1)
-                PartArray%Part%coords(:,3) = PartArray%Part%coords(:,1)
-            end if
-        end if
-
-        call P_WC(PartArray%Part,self%c_0,self%rho_0,self%state_gamma, integStep)
-        call CS_WC(PartArray%Part,self%rho_0,self%c_0,self%state_gamma, integStep)
-
-        if (PartArray%lst_neigh%nb_elts /= 0) then
-            call PartArray%lst_neigh%resetList()
-        end if
-        deallocate(vec_gradW)
-    end subroutine Verlet
-
-    !> Applies a correction to the kernel gradient
-    subroutine kernelCor(PA, gradW, gradW_mod, integStep)
-        implicit none
-        class(ParticleArray) :: PA
-
-        real(kind=prec), dimension(:,:) :: gradW
-        real(kind=prec), dimension(:,:) :: gradW_mod
-
-        real(kind=prec), dimension(2,2) :: M
-        real(kind=prec), dimension(2,2) :: L
-        integer :: i,j,k
-        real(kind=prec) :: detM
-        real(kind=prec) :: MDivRho
-        integer :: integStep
-        class(Particle), pointer :: p_neigh
-
-        M(1,1) = 0.0d0
-        M(2,2) = 0.0d0
-        M(1,2) = 0.0d0
-
-        do i = 1, PA%lst_neigh%nb_elts
-            p_neigh => PA%lst_neigh%lst_parts(i)%PTR
-            MDivRho = p_neigh%mass / p_neigh%density(integStep)
-            M(1,1) = M(1,1) + MDivRho * (p_neigh%coords(1,integStep) - PA%Part%coords(1,integStep)) * gradW(1,i)
-            M(2,2) = M(2,2) + MDivRho * (p_neigh%coords(2,integStep) - PA%Part%coords(2,integStep)) * gradW(2,i)
-            M(1,2) = M(1,1) + MDivRho * (p_neigh%coords(1,integStep) - PA%Part%coords(1,integStep)) * gradW(2,i)
-        end do
-
-        !> M is symmetric
-        M(2,1) = M(1,2)
-
-        !> computes the determinant of M
-        detM = M(1,1) * M(2,2) - M(1,2) * M(2,1)
-        
-        !> compute M^-1 = L
-        L(1,1) = M(2,2)
-        L(2,2) = M(1,1)
-        L(1,2) = -M(1,2)
-
-        !> L is symmetric, because M is symmetric
-        L(2,1) = L(1,2)
-
-        L = (1.0d0/detM) * L
-
-        do i=1, PA%lst_neigh%nb_elts
-            gradW_mod(1,i) = 0.0d0
-            gradW_mod(2,i) = 0.0d0
-            do j=1,2
-                do k=1,2
-                    gradW_mod(j,i) = gradW_mod(j,i) + L(j,k) * gradW(k,i)
-                end do
+            ! 2. Compute Consistent Density from EoS: 
+            ! rho = rho0 * (P/B + 1)^(1/gamma)
+            rho_init = self%rho0 * ((p_init / B) + 1.0_prec)**(1.0_prec / self%gamma_eos)
+            
+            ! 3. Apply to all time slots to prevent initial oscillations
+            do s = 1, nSteps
+                self%sys%pressure(s, i) = p_init
+                self%sys%density(s, i)  = rho_init
             end do
+            
+            ! 4. Anchor fixed particles (DBC)
+            if (.not. self%sys%mobile(i)) then
+                do s = 2, nSteps
+                    self%sys%coords(:, s, i) = self%sys%coords(:, 1, i)
+                end do
+            end if
         end do
-    
-    end subroutine kernelCor
+
+        ! Mass calculation for each particle
+        self%sys%mass(:) = self%rho0 * (spacing**nDim)
+        self%sys%h_part(:) = h0
+        
+        print *, "Hydrostatic setup complete. Max Pressure: ", &
+                 self%rho0 * g_abs * 2.0_prec, " Pa"
+    end subroutine setup_scene
+
+
+    !> 2. Main simulation time loop
+    subroutine run_simulation(self)
+        class(SPH_App) :: self
+        integer, allocatable :: next_array(:)
+        
+        print *, "Starting SPH Solver | Int: ", SELECTED_INT, &
+                 " | Density: ", DENSITY_METHOD
+        
+        do while (self%currentTime < self%maxTime)
+            self%currentIt = self%currentIt + 1
+            
+            ! Perform a complete physical step
+            call self%solve_one_step(next_array)
+            
+            self%currentTime = self%currentTime + self%dt
+            
+            ! Data output at specified intervals
+            if (mod(self%currentIt, self%saveInt) == 0) then
+                call self%save_results()
+                print '(A,F8.4,A,I6)', " Time: ", self%currentTime, &
+                      " | Iter: ", self%currentIt
+            end if
+        end do
+        
+        if (allocated(next_array)) deallocate(next_array)
+    end subroutine run_simulation
+
+
+    !> 3. Orchestrates one complete SPH step (Workflow)
+    subroutine solve_one_step(self, next_array)
+        class(SPH_App) :: self
+        integer, allocatable, intent(inout) :: next_array(:)
+        integer :: target_slot
+
+        ! --- STEP 1: Evaluation at t (Slot 1) ---
+        call self%srt%build_grid()
+        call self%srt%sort(self%sys, self%dom_dim, next_array)
+        call compute_all_neighbors(self%sys, self%srt, next_array, KAPPA_CUBIC)
+        
+        call update_density(self%sys, 1)
+        call pressure_wc(self%sys, self%rho0, self%c0, self%gamma_eos, 1)
+        call compute_all_forces(self%sys, self%alpha, self%beta, 1)
+
+        ! --- STEP 2: Predictor / First Kick ---
+        call integration_phase_1(self%sys, self%dt)
+
+        ! --- STEP 3: Evaluation at intermediate point ---
+        if (SELECTED_INT /= INT_EULER) then
+            ! For RK22, we evaluate at Slot 2 (t + dt/2)
+            ! For Verlet, we evaluate at Slot 3 (t + dt)
+            target_slot = merge(2, 3, SELECTED_INT == INT_RK22)
+            
+            call self%srt%build_grid()
+            call self%srt%sort(self%sys, self%dom_dim, next_array)
+            call compute_all_neighbors(self%sys, self%srt, next_array, KAPPA_CUBIC)
+            
+            call update_density(self%sys, target_slot)
+            call pressure_wc(self%sys, self%rho0, self%c0, self%gamma_eos, target_slot)
+            call compute_all_forces(self%sys, self%alpha, self%beta, target_slot)
+        end if
+
+        ! --- STEP 4: Corrector / Final Kick ---
+        call integration_phase_2(self%sys, self%dt)
+        call shift_data(self%sys)
+        
+    end subroutine solve_one_step
+
+
+    !> 4. Export simulation data to CSV format
+    subroutine save_results(self)
+        class(SPH_App) :: self
+        integer :: u, i
+        character(len=32) :: filename
+        
+        write(filename, '(A,I0.4,A)') "output_", self%currentIt, ".csv"
+        open(newunit=u, file=filename, status='replace')
+        
+        ! Header for CSV post-processing (ParaView/Python)
+        write(u, '(A)') "x,y,v_mag,rho,p,mobile"
+        
+        do i = 1, self%sys%nPart
+            write(u, '(5(F12.6,A),L2)') &
+                self%sys%coords(1, 1, i), ",", &
+                self%sys%coords(2, 1, i), ",", &
+                sqrt(sum(self%sys%velocity(:, 1, i)**2)), ",", &
+                self%sys%density(1, i), ",", &
+                self%sys%pressure(1, i), ",", &
+                self%sys%mobile(i)
+        end do
+        close(u)
+    end subroutine save_results
+
 end module application

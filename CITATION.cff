@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+  - family-names: "Bodin"
+    given-names: "Bastien"
+    orcid: "https://orcid.org/0000-0003-3602-2589"
+title: "SPH-Prototype: High-Performance WCSPH Solver for Cryolava Flows"
+version: 2.0.0
+date-released: 2026-01-11
+url: "https://github.com/bastien-bodin/SPH-Europa"
+preferred-citation:
+  type: thesis
+  authors:
+    - family-names: "Bodin"
+      given-names: "Bastien"
+  title: "Numerical modeling of cryolava flows on Europa using SPH methods"
+  school: "Université de Reims Champagne-Ardenne"
+  year: 2025

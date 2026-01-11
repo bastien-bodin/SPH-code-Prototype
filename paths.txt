@@ -1,3 +1,0 @@
-param.txt
-fp_path.txt
-mp_path.txt

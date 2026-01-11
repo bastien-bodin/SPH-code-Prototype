@@ -2,132 +2,104 @@ module particles
     use parameters
     implicit none
 
-    
-    type :: Particle
-        real(kind=prec), dimension(2,3)  :: coords                  ! coordinates of the particle
-        real(kind=prec), dimension(2,3)  :: velocity                ! velocity of the particle
-        real(kind=prec), dimension(1:2)  :: acceler                 ! acceleration of the particle
-        real(kind=prec), dimension(1:3)  :: density                 ! density of the particle
-        real(kind=prec), dimension(1:3)  :: pressure                ! pressure at the particle
-        real(kind=prec), dimension(1:3)  :: c_sound                 ! sound speed
-        real(kind=prec), dimension(1:3)  :: u_therm                 ! Thermal Energy
-        real(kind=prec)                  :: mass = 1.               ! mass of the particle
-        real(kind=prec)                  :: h_part = 0.5            ! smoothing length
-        real(kind=prec)                  :: max_mu_ab               ! from the artificial viscosity
-        real(kind=prec)                  :: molMass                 ! Molar Mass
-        logical                          :: mobile = .false.        ! if true, mobile part -> solve eq. of motion
-    end type Particle
-
-    type :: PointPart
-        type(Particle), pointer :: PTR => null()
-    end type PointPart
-
-    type :: ParticleList
-        integer                          :: nb_elts = 0
-        integer                          :: incr = 35
-        integer                          :: max_nb_elts = 0
-        type(PointPart), dimension(:), allocatable :: lst_parts ! list of particles
+    !> Structure of Arrays (SoA) for high performance SPH
+    type :: ParticleSystem
+        integer :: nPart          = 0
+        integer :: maxPart        = 0
+        
+        ! --- Vector Properties (dimension, time_slot, particle_index) ---
+        real(prec), allocatable :: coords(:,:,:)   
+        real(prec), allocatable :: velocity(:,:,:) 
+        real(prec), allocatable :: acceler(:,:)    ! dV/dt
+        
+        ! --- Scalar Properties (time_slot, particle_index) ---
+        real(prec), allocatable :: density(:,:)    
+        real(prec), allocatable :: pressure(:,:)   
+        real(prec), allocatable :: c_sound(:,:)    
+        real(prec), allocatable :: u_therm(:,:)    
+        
+        ! --- Time Derivatives (particle_index) ---
+        ! These are needed for the Continuity and Energy equations
+        real(prec), allocatable :: drhodt(:)       ! dRho/dt
+        real(prec), allocatable :: dudt(:)         ! du/dt (Internal Energy rate)
+        
+        ! --- Constant/Slower Properties (particle_index) ---
+        real(prec), allocatable :: mass(:)         
+        real(prec), allocatable :: h_part(:)       
+        logical,    allocatable :: mobile(:)       
+        
+        ! --- Neighbor Management ---
+        integer, allocatable    :: neigh_list(:)   
+        integer, allocatable    :: neigh_ptr(:)    
+        integer, allocatable    :: neigh_count(:)  
+        integer                 :: max_neighbors   
+        
     contains
-        procedure :: initList
-        procedure :: addElt
-        procedure :: resetList
-    end type ParticleList
-
-    type :: ParticleArray
-        type(Particle) :: Part
-        type(ParticleList) :: lst_neigh
-    end type ParticleArray
-
-    type :: PointPA
-        type(ParticleArray), pointer :: PTR
-    end type PointPA
-
-    type :: ListPA
-        integer                          :: nb_elts = 0
-        integer                          :: incr = 35
-        integer                          :: max_nb_elts = 0
-        type(PointPA), dimension(:), allocatable :: lst_PA
-    contains
-        procedure :: initListPA
-        procedure :: addEltPA
-        procedure :: resetListPA
-    end type ListPA
+        procedure :: init => init_system
+        procedure :: add_particle => add_single_particle
+    end type ParticleSystem
 
 contains
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    !> Particle List
-    subroutine initList(self)
-        class(ParticleList) :: self
 
-        if ( self%incr < 1 ) then
-            self%incr = 1
+    subroutine init_system(self, capacity)
+        class(ParticleSystem) :: self
+        integer, intent(in)   :: capacity
+
+        self%maxPart = capacity
+        
+        ! Vectors
+        allocate(self%coords(nDim, nSteps, self%maxPart))
+        allocate(self%velocity(nDim, nSteps, self%maxPart))
+        allocate(self%acceler(nDim, self%maxPart))
+        
+        ! Scalars
+        allocate(self%density(nSteps, self%maxPart))
+        allocate(self%pressure(nSteps, self%maxPart))
+        allocate(self%c_sound(nSteps, self%maxPart))
+        allocate(self%u_therm(nSteps, self%maxPart))
+        
+        ! Derivatives (Missing parts added here)
+        allocate(self%drhodt(self%maxPart))
+        allocate(self%dudt(self%maxPart))
+        
+        ! Constants
+        allocate(self%mass(self%maxPart))
+        allocate(self%h_part(self%maxPart))
+        allocate(self%mobile(self%maxPart))
+
+        ! Neighbors
+        if (nDim == 2) then
+            self%max_neighbors = self%maxPart * 64
+        else
+            self%max_neighbors = self%maxPart * 256
+        end if
+        
+        allocate(self%neigh_list(self%max_neighbors))
+        allocate(self%neigh_ptr(self%maxPart))
+        allocate(self%neigh_count(self%maxPart))
+        
+        ! Initialize derivatives to zero
+        self%drhodt = 0.0_prec
+        self%dudt   = 0.0_prec
+    end subroutine init_system
+
+    subroutine add_single_particle(self, x_vec, v_vec, m, h, is_mobile)
+        class(ParticleSystem) :: self
+        real(prec), dimension(nDim), intent(in) :: x_vec, v_vec
+        real(prec), intent(in) :: m, h
+        logical, intent(in)    :: is_mobile
+        
+        if (self%nPart >= self%maxPart) then
+            print *, "Error: ParticleSystem capacity exceeded. Resize needed."
+            return
         end if
 
-        self%max_nb_elts = self%incr                    ! put the number of elements to incr
-        allocate(self%lst_parts(1:self%max_nb_elts))    ! allocation
-    end subroutine initList
+        self%nPart = self%nPart + 1
+        self%coords(:, 1, self%nPart)   = x_vec
+        self%velocity(:, 1, self%nPart) = v_vec
+        self%mass(self%nPart)           = m
+        self%h_part(self%nPart)         = h
+        self%mobile(self%nPart)         = is_mobile
+    end subroutine add_single_particle
 
-    subroutine addElt(self, Part_Ptr)
-        class(ParticleList) :: self
-        type(Particle), pointer :: Part_Ptr
-
-        type(PointPart), dimension(:), allocatable :: temp_lst
-
-        if (self%nb_elts == 0) then
-            call self%initList()
-        else if (self%nb_elts == self%max_nb_elts) then
-            allocate(temp_lst(1:self%max_nb_elts + self%incr))
-            temp_lst(1:self%max_nb_elts) = self%lst_parts(1:self%max_nb_elts)
-            call move_alloc(temp_lst,self%lst_parts)
-            self%max_nb_elts = self%max_nb_elts + self%incr
-        end if
-
-        self%nb_elts = self%nb_elts + 1
-        self%lst_parts(self%nb_elts)%PTR => Part_Ptr
-    end subroutine addElt
-
-    subroutine resetList(self)
-        class(ParticleList) :: self
-
-        self%nb_elts = 0
-        deallocate(self%lst_parts)
-    end subroutine resetList
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    !> ParticleArray List
-    subroutine initListPA(self)
-        class(ListPA) :: self
-
-        if ( self%incr < 1 ) then
-            self%incr = 1
-        end if
-
-        self%max_nb_elts = self%incr                    ! put the number of elements to incr
-        allocate(self%lst_PA(1:self%max_nb_elts))    ! allocation
-    end subroutine initListPA
-
-    subroutine addEltPA(self, PA_Ptr)
-        class(ListPA) :: self
-        type(ParticleArray), pointer :: PA_Ptr
-
-        type(PointPA), dimension(:), allocatable :: temp_lst
-
-        if ((self%nb_elts == 0) .and. (self%max_nb_elts ==0)) then
-            call self%initListPA()
-        else if (self%nb_elts == self%max_nb_elts) then
-            allocate(temp_lst(1:self%max_nb_elts + self%incr))
-            temp_lst(1:self%max_nb_elts) = self%lst_PA(1:self%max_nb_elts)
-            call move_alloc(temp_lst,self%lst_PA)
-            self%max_nb_elts = self%max_nb_elts + self%incr
-        end if
-
-        self%nb_elts = self%nb_elts + 1
-        self%lst_PA(self%nb_elts)%PTR => PA_Ptr
-    end subroutine addEltPA
-
-    subroutine resetListPA(self)
-        class(ListPA) :: self
-
-        self%nb_elts = 0
-        deallocate(self%lst_PA)
-    end subroutine resetListPA
 end module particles
